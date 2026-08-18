@@ -24,6 +24,36 @@
         });
       };
 
+      templates.default = {
+        path = ./templates/default;
+        description = "App flake exporting a previews attrset";
+      };
+
+      packages.${system}.options-doc =
+        let
+          eval = nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = [
+              self.nixosModules.default
+              {
+                fileSystems."/" = { device = "/dev/sda1"; fsType = "ext4"; };
+                boot.loader.grub.device = "/dev/sda";
+                system.stateVersion = "24.11";
+              }
+            ];
+          };
+          doc = pkgs.nixosOptionsDoc {
+            options = eval.options.services.pr-previews;
+            transformOptions = opt: opt // {
+              declarations = map (_: {
+                url = "https://github.com/schemalabz/pr-previews/blob/main/module";
+                name = "module";
+              }) opt.declarations;
+            };
+          };
+        in
+        pkgs.runCommand "options.md" { } "cp ${doc.optionsCommonMark} $out";
+
       formatter.${system} = pkgs.nixfmt-rfc-style;
     };
 }

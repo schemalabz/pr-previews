@@ -1,0 +1,34 @@
+# Example PR-preview cleanup workflow.
+# Note: GitHub's `closed` event can silently not fire for merge-conflicted
+# PRs — a periodic reconcile sweep is the robust backstop (see roadmap).
+name: Cleanup PR Preview
+
+on:
+  pull_request_target:
+    types: [closed]
+    branches: [main]
+
+concurrency:
+  group: preview-cleanup-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Destroy Preview Instance
+    runs-on: ubuntu-latest
+    environment: preview
+    steps:
+      - name: Destroy preview
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PREVIEW_DEPLOY_SSH_KEY }}
+          PREVIEW_HOST: ${{ secrets.PREVIEW_HOST }}
+          PREVIEW_USER: ${{ secrets.PREVIEW_USER }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$PREVIEW_HOST" >> ~/.ssh/known_hosts
+          ssh "$PREVIEW_USER@$PREVIEW_HOST" \
+            "sudo myapp-preview-destroy $PR"

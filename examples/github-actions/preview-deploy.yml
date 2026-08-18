@@ -1,0 +1,79 @@
+# Example PR-preview deploy workflow. Adapted from a production setup.
+# SECURITY: pull_request_target runs with secrets — gate on trusted authors
+# (see docs/trust-model.md) before building or deploying fork code.
+name: Deploy PR Preview
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  pull-requests: write
+
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Build and Deploy Preview
+    runs-on: ubuntu-latest
+    environment: preview
+    # Author gate — replace with your org's trusted-contributor check.
+    # NOTE: same-repo is necessary but NOT sufficient — Dependabot pushes its
+    # branches to the repository itself, so it passes a same-repo check and
+    # would build a dependency-bump PR with secrets access. Exclude machine
+    # actors explicitly (nobody needs a preview of a lockfile bump).
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]' &&
+      github.actor != 'renovate[bot]'
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Set up Cachix
+        uses: cachix/cachix-action@v15
+        with:
+          name: ${{ secrets.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build app
+        id: build
+        run: |
+          set -euo pipefail
+          nix build .#myapp-prod --print-out-paths | tail -1 > store-path
+          echo "store-path=$(cat store-path)" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy preview
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PREVIEW_DEPLOY_SSH_KEY }}
+          PREVIEW_HOST: ${{ secrets.PREVIEW_HOST }}
+          PREVIEW_USER: ${{ secrets.PREVIEW_USER }}
+          PR: ${{ github.event.pull_request.number }}
+          STORE_PATH: ${{ steps.build.outputs.store-path }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$PREVIEW_HOST" >> ~/.ssh/known_hosts
+          ssh "$PREVIEW_USER@$PREVIEW_HOST" \
+            "sudo myapp-preview-create $PR $STORE_PATH"
+
+      - name: Comment preview URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request.number;
+            github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: pr,
+              body: `🔍 Preview: https://pr-${pr}.preview.example.com`,
+            });
