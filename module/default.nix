@@ -40,6 +40,12 @@ let
       enabledProjects;
 
   forEachProject = f: mapAttrsToList f enabledProjects;
+
+  scriptsFor = name: project: import ./scripts.nix {
+    inherit pkgs lib name project;
+    topCfg = cfg;
+    allProjects = enabledProjects;
+  };
 in
 {
   options.services.pr-previews = {
@@ -150,21 +156,24 @@ in
 
         services = mapAttrs'
           (name: project:
-            let
-              serviceName = "${name}-preview";
-              # Placeholder until Task 4 wires the real start script:
-              startScript = pkgs.writeShellScript "${serviceName}-start-placeholder" "exit 1";
-            in
-            nameValuePair "${serviceName}@" (import ./service.nix {
-              inherit lib name project startScript;
+            nameValuePair "${name}-preview@" (import ./service.nix {
+              inherit lib name project;
               topCfg = cfg;
+              startScript = getExe (scriptsFor name project).start;
             }))
           enabledProjects;
       }
     ] ++ extraOf "systemd");
 
     environment = mkMerge ([
-      { systemPackages = [ pkgs.git pkgs.cachix pkgs.curl pkgs.jq ]; }
+      {
+        systemPackages =
+          [ pkgs.git pkgs.cachix pkgs.curl pkgs.jq ]
+          ++ concatLists (forEachProject (name: project:
+            let scripts = scriptsFor name project;
+            in [ scripts.create scripts.destroy scripts.list scripts.logs ]
+               ++ (project.extraPackages pkgs)));
+      }
     ] ++ extraOf "environment");
 
     security = mkMerge ([ { } ] ++ extraOf "security");
