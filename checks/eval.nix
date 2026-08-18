@@ -29,6 +29,18 @@
           createHook = pkgs: ctx: ''
             echo "creating beta preview $pr_num next to ${ctx.siblings.alpha.host}"
           '';
+          extraSudoCommands = { pkgs, serviceName }: [
+            { command = "${pkgs.systemd}/bin/systemctl start beta-aux@*"; options = [ "NOPASSWD" ]; }
+          ];
+          extraConfig = { config, lib, pkgs, cfg }: {
+            systemd.services."beta-preview-db@" = {
+              description = "beta aux service for PR %i (state under ${cfg.previewsDir})";
+              serviceConfig = {
+                Type = "simple";
+                ExecStart = "${pkgs.coreutils}/bin/sleep 1";
+              };
+            };
+          };
         };
       };
       # Minimal NixOS eval requirements

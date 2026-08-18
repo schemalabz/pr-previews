@@ -176,6 +176,34 @@ in
       }
     ] ++ extraOf "environment");
 
-    security = mkMerge ([ { } ] ++ extraOf "security");
+    security =
+      let
+        sudoRules = forEachProject (name: project:
+          let serviceName = "${name}-preview";
+          in {
+            users = [ cfg.user ];
+            commands =
+              [
+                { command = "${pkgs.systemd}/bin/systemctl start ${serviceName}@*"; options = [ "NOPASSWD" ]; }
+                { command = "${pkgs.systemd}/bin/systemctl stop ${serviceName}@*"; options = [ "NOPASSWD" ]; }
+                { command = "${pkgs.systemd}/bin/systemctl enable ${serviceName}@*"; options = [ "NOPASSWD" ]; }
+                { command = "${pkgs.systemd}/bin/systemctl disable ${serviceName}@*"; options = [ "NOPASSWD" ]; }
+                { command = "${pkgs.systemd}/bin/systemctl status ${serviceName}@*"; options = [ "NOPASSWD" ]; }
+                { command = "${pkgs.systemd}/bin/systemctl reload caddy"; options = [ "NOPASSWD" ]; }
+                { command = "/run/current-system/sw/bin/${serviceName}-create"; options = [ "NOPASSWD" ]; }
+                { command = "/run/current-system/sw/bin/${serviceName}-destroy"; options = [ "NOPASSWD" ]; }
+              ]
+              ++ (optionals (project.extraSudoCommands != null)
+                   (project.extraSudoCommands { inherit pkgs serviceName; }));
+          });
+      in
+      mkMerge ([
+        {
+          sudo.extraRules = sudoRules;
+          # NixOS is migrating to sudo-rs; mirror the rules so hosts that
+          # flip security.sudo-rs.enable keep working.
+          sudo-rs.extraRules = sudoRules;
+        }
+      ] ++ extraOf "security");
   };
 }
