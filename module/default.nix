@@ -63,6 +63,18 @@ in
       description = "Group of the shared preview user.";
     };
 
+    homeDir = mkOption {
+      type = types.path;
+      default = "/var/lib/pr-previews";
+      description = ''
+        Home directory of the shared preview user. If your CI authenticates
+        as this user with an SSH key, sshd resolves `~/.ssh/authorized_keys`
+        relative to THIS path — when adopting the module for a user that
+        already exists, keep the original home or CI deploys break with
+        "Permission denied (publickey)".
+      '';
+    };
+
     projects = mkOption {
       type = types.attrsOf (types.submodule (import ./project-options.nix));
       default = { };
@@ -97,7 +109,7 @@ in
         users.${cfg.user} = {
           isSystemUser = true;
           group = cfg.group;
-          home = "/var/lib/pr-previews";
+          home = cfg.homeDir;
           createHome = true;
           shell = pkgs.bash;
         };
