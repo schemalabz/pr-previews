@@ -127,10 +127,12 @@ fragment. `ctx` fields are shell expansions valid at that call site:
 | `cfg` | project config (+ shared `user`/`group`); free-form values under `cfg.settings` | same | |
 | `siblings.<name>` | `{ port, host, url }` of other projects, same PR | same | |
 
-Optional per-project hooks: `createHook` (after fetch, before start — DB
-provisioning lives here), `destroyHook` (after stop, before cleanup),
-`createSummary`, `createExtraArgs` (add flags like `--with-db` to the create
-script), `extraConfig` (arbitrary NixOS config, e.g. an auxiliary per-PR
+Optional per-project options: `redirectFrom` (legacy hostname patterns
+that 301 to the current one — see "Moving domains"), `envFile` (shared
+per-project EnvironmentFile), and hooks: `createHook` (after fetch, before
+start — DB provisioning lives here), `destroyHook` (after stop, before
+cleanup), `createSummary`, `createExtraArgs` (add flags like `--with-db` to
+the create script), `extraConfig` (arbitrary NixOS config, e.g. an auxiliary per-PR
 database template unit — may target `systemd`/`environment`/`security`/
 `users`/`networking`/`nix`, not `services.*`), `extraPackages`,
 `extraSudoCommands`, `settings` (free-form values for your hooks).
@@ -141,16 +143,53 @@ The ultimate escape hatch is standard NixOS: override anything on
 ## DNS and TLS requirements
 
 - A wildcard DNS record: `*.preview.example.com → your server`.
-- A DNS-01 wildcard certificate — Caddy needs a
-  [caddy-dns plugin](https://github.com/caddy-dns) for your DNS provider
-  (per-hostname HTTP-01 certs run into Let's Encrypt's 50 certs/domain/week
-  limit; a wildcard covers unlimited PRs).
-- `hostPattern` must stay a **single DNS label** under the wildcard's parent:
-  `myapp-pr-@id@.preview.example.com` works, `pr-@id@.myapp.preview.example.com`
-  needs a second wildcard cert.
+- Certificates, two options:
+  - **Per-hostname (default, zero setup)**: Caddy issues an HTTP-01 cert per
+    preview hostname on first request. Works out of the box and is what the
+    reference deployment runs. Mind Let's Encrypt's ~50 new certs per
+    registered domain per week — fine for typical PR volume, an issue for
+    very high churn.
+  - **Wildcard (for scale)**: one DNS-01 cert covers unlimited PRs, but
+    Caddy needs a [caddy-dns plugin](https://github.com/caddy-dns) for your
+    DNS provider.
+- Keep `hostPattern` a **single DNS label** under one parent
+  (`myapp-pr-@id@.preview.example.com`, never
+  `pr-@id@.myapp.preview.example.com`) — it keeps all projects under one
+  wildcard DNS record, one cookie parent for paired services, and one
+  wildcard cert if you use one.
 - Cookie scope: all instances under one parent share that parent's cookie
   scope. That is deliberate for paired services (suffix your cookies per PR);
   use host-only cookies otherwise.
+
+## Moving domains
+
+Set the new `hostPattern` and list the old pattern in `redirectFrom`:
+
+```nix
+hostPattern = "pr-@id@.new-domain.example";
+redirectFrom = [ "pr-@id@.old-domain.example" ];
+```
+
+Every preview then also answers on the legacy hostname with a 301 to the
+new one. Existing previews migrate on their next deploy; drop
+`redirectFrom` once old links are out of circulation. (301s are reliable
+for browsers; API clients that persisted old URLs may mishandle redirected
+non-GET requests — they pick up the new URL on their next redeploy.)
+
+## Migrating an existing preview setup
+
+Adopting the module for previews that already exist on a host? Three
+continuity rules, learned the hard way:
+
+1. **Keep the user, group, and per-project `previewsDir`** your instances
+   already use — existing state dirs and DB clusters must stay owned and
+   found.
+2. **Pin `homeDir` to the user's original home.** sshd resolves the CI
+   deploy key's `~/.ssh/authorized_keys` relative to it; changing the home
+   silently breaks CI SSH with "Permission denied (publickey)".
+3. Script names, unit names, and Caddy config filenames derive from the
+   project name — keep the name and running instances survive the switch
+   untouched (units carry `restartIfChanged = false`).
 
 ## CI wiring
 
