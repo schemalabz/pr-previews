@@ -21,6 +21,7 @@ let
     "path:/home/kouloumos/schema-labs/projects/opencouncil-tasks-worktrees/generic-preview-module";
 
   ocProd = ocFlake.packages.x86_64-linux.opencouncil-prod;
+  notisProd = ocFlake.packages.x86_64-linux.notis-prod;
   ocTasksProd = tasksFlake.packages.x86_64-linux.opencouncil-tasks-prod;
 in
 nixos-lib.runTest {
@@ -50,6 +51,10 @@ nixos-lib.runTest {
           tasksFlake.previews.opencouncil-tasks
           { envFile = "/etc/preview-dummy.env"; }
         ];
+        notis = lib.mkMerge [
+          ocFlake.previews.notis
+          { envFile = "/etc/preview-dummy.env"; }
+        ];
       };
     };
 
@@ -58,6 +63,7 @@ nixos-lib.runTest {
 
     environment.etc."preview-dummy.env".text = ''
       ANTHROPIC_API_KEY=dummy
+      NOTIS_ADMIN_SECRET=dummy-secret-at-least-16-chars
       API_TOKENS=["dummy-preview-token"]
       NEXTAUTH_SECRET=dummy-secret-for-e2e
       ELASTICSEARCH_URL=http://127.0.0.1:59998
@@ -70,12 +76,14 @@ nixos-lib.runTest {
 
     # Anchor the real app closures into the VM's store.
     environment.etc."anchors/oc".source = ocProd;
+    environment.etc."anchors/notis".source = notisProd;
     environment.etc."anchors/tasks".source = ocTasksProd;
   };
 
   testScript = ''
     tasks = "${ocTasksProd}"
     oc = "${ocProd}"
+    notis = "${notisProd}"
 
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("caddy.service")
@@ -90,6 +98,21 @@ nixos-lib.runTest {
         machine.succeed("test -f /etc/caddy/conf.d/opencouncil-tasks-pr-7.conf")
         machine.succeed(f"nix-store --query --roots {tasks} | grep -q pr-7")
         machine.succeed("opencouncil-tasks-preview-destroy 7 >&2")
+
+    with subtest("REQUIRED: paired notis preview serves and points at its sibling"):
+        machine.succeed(f"notis-preview-create 7 {notis} >&2")
+        machine.wait_for_unit("notis-preview@5007.service")
+        machine.wait_until_succeeds(
+            "code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5007/); test \"$code\" != 000",
+            timeout=120,
+        )
+        # siblings wiring: the RUNNING process env must point at THIS PR's
+        # main preview (URL resolved from $PR_NUM at start time).
+        machine.succeed(
+            "pid=$(systemctl show notis-preview@5007 -p MainPID --value); "
+            "tr '\\0' '\\n' < /proc/$pid/environ | grep -x 'OPENCOUNCIL_BASE_URL=https://pr-7.opencouncil.dev'"
+        )
+        machine.succeed("notis-preview-destroy 7 >&2")
 
     with subtest("BEST-EFFORT: opencouncil --with-db (cluster, PostGIS, migrations, seed, boot)"):
         outcome = "not-started"
