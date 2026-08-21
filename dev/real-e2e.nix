@@ -99,21 +99,6 @@ nixos-lib.runTest {
         machine.succeed(f"nix-store --query --roots {tasks} | grep -q pr-7")
         machine.succeed("opencouncil-tasks-preview-destroy 7 >&2")
 
-    with subtest("REQUIRED: paired notis preview serves and points at its sibling"):
-        machine.succeed(f"notis-preview-create 7 {notis} >&2")
-        machine.wait_for_unit("notis-preview@5007.service")
-        machine.wait_until_succeeds(
-            "code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:5007/); test \"$code\" != 000",
-            timeout=120,
-        )
-        # siblings wiring: the RUNNING process env must point at THIS PR's
-        # main preview (URL resolved from $PR_NUM at start time).
-        machine.succeed(
-            "pid=$(systemctl show notis-preview@5007 -p MainPID --value); "
-            "tr '\\0' '\\n' < /proc/$pid/environ | grep -x 'OPENCOUNCIL_BASE_URL=https://pr-7.opencouncil.dev'"
-        )
-        machine.succeed("notis-preview-destroy 7 >&2")
-
     with subtest("BEST-EFFORT: opencouncil --with-db (cluster, PostGIS, migrations, seed, boot)"):
         outcome = "not-started"
         try:
@@ -135,9 +120,44 @@ nixos-lib.runTest {
             )
             outcome = "app-responds"
         except Exception as e:
-            machine.log(f"BEST-EFFORT OUTCOME: {outcome}; failure: {e}")
+            machine.log(f"OUTCOME: {outcome}; failure: {e}")
             machine.execute("journalctl -u opencouncil-preview@3009 -n 40 --no-pager >&2 || true")
             machine.execute("journalctl -u opencouncil-preview-db@9 -n 20 --no-pager >&2 || true")
-        print(f"### OPENCOUNCIL BEST-EFFORT OUTCOME: {outcome}")
+            raise
+        print(f"### OPENCOUNCIL OUTCOME: {outcome}")
+
+    with subtest("REQUIRED: paired notis preview — DB, migrations, role bridge, cookie env"):
+        machine.succeed(f"notis-preview-create 9 {notis} >&2")
+        machine.wait_for_unit("notis-preview@20009.service")
+
+        # createHook results: notis DB exists with migrated tables; the
+        # notis_service login role can read the main DB.
+        machine.succeed(
+            "sudo -u opencouncil psql -h 127.0.0.1 -p 5441 -U opencouncil -d notis -tc \"SELECT count(*) FROM pg_tables WHERE schemaname='public'\" | grep -qv '^ *0$'"
+        )
+        machine.succeed(
+            "sudo -u opencouncil psql -h 127.0.0.1 -p 5441 -U notis_service -d opencouncil -tc 'SELECT 1' | grep -q 1"
+        )
+
+        # The running notis process got the paired env.
+        machine.succeed(
+            "pid=$(systemctl show notis-preview@20009 -p MainPID --value); "
+            "tr '\\0' '\\n' < /proc/$pid/environ | grep -x 'MAIN_SESSION_COOKIE_NAME=__Secure-oc-session-pr9'"
+        )
+        machine.succeed(
+            "pid=$(systemctl show notis-preview@20009 -p MainPID --value); "
+            "tr '\\0' '\\n' < /proc/$pid/environ | grep -q 'NOTIS_DATABASE_URL=postgresql://opencouncil@127.0.0.1:5441/notis'"
+        )
+        machine.wait_until_succeeds(
+            "code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:20009/); case $code in 2??|3??|401|403) true;; *) false;; esac",
+            timeout=120,
+        )
+
+        # The paired main preview mirrors its session with the pr-9 suffix.
+        machine.succeed(
+            "pid=$(systemctl show opencouncil-preview@3009 -p MainPID --value); "
+            "tr '\\0' '\\n' < /proc/$pid/environ | grep -x 'SESSION_COOKIE_SUFFIX=-pr9'"
+        )
+        machine.succeed("notis-preview-destroy 9 >&2")
   '';
 }
