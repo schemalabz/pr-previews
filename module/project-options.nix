@@ -44,6 +44,17 @@ with lib;
       description = "Directory holding per-PR instance state (`pr-<N>/`).";
     };
 
+    startupTimeout = mkOption {
+      type = types.ints.positive;
+      default = 60;
+      description = ''
+        Seconds the create script waits for the started instance to answer
+        HTTP on its port before failing (any HTTP response counts — the app
+        is up; auth-gated routes may 401). On timeout, create prints the
+        instance journal and exits nonzero.
+      '';
+    };
+
     envFile = mkOption {
       type = types.nullOr types.path;
       default = null;

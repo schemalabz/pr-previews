@@ -51,7 +51,7 @@ let
   # to this domain, excluded everywhere.
   mkScript = scriptName: text: pkgs.writeShellApplication {
     name = scriptName;
-    runtimeInputs = [ pkgs.nix pkgs.systemd pkgs.coreutils ];
+    runtimeInputs = [ pkgs.nix pkgs.systemd pkgs.coreutils pkgs.curl ];
     excludeShellChecks = [ "SC1091" ];
     inherit text;
   };
@@ -133,6 +133,24 @@ in
     # Stop existing service if running, then start fresh
     systemctl stop "${serviceName}@$port" 2>/dev/null || true
     systemctl start "${serviceName}@$port"
+
+    # Readiness: success from this script must mean the app ANSWERS. Poll
+    # the instance port directly (no proxy in the way); any HTTP status
+    # counts as up — auth-gated routes may 401. On timeout, surface the
+    # journal and fail so callers (CI included) see a real error.
+    ready=false
+    for _ in $(seq 1 ${toString project.startupTimeout}); do
+      code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$port/" || true)
+      case "$code" in
+        [1-5][0-9][0-9]) ready=true; break ;;
+        *) sleep 1 ;;
+      esac
+    done
+    if [ "$ready" != "true" ]; then
+      echo "Error: instance did not answer on port $port within ${toString project.startupTimeout}s" >&2
+      journalctl -u "${serviceName}@$port" -n 30 --no-pager >&2 || true
+      exit 1
+    fi
 
     # Add Caddy reverse proxy config.
     # Clean up any legacy config files (pre-generic-preview naming).

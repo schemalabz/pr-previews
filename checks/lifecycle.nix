@@ -5,6 +5,12 @@
 let
   # The fake app follows the runtime-ownership rule: its build produces its
   # own entrypoint, whose closure carries its own runtime (python here).
+  brokenApp = pkgs.runCommand "broken-preview-app" { } (let s = "exit 1"; in ''
+    mkdir -p $out/bin
+    printf '#!%s\n%s\n' "${pkgs.runtimeShell}" "${s}" > $out/bin/start
+    chmod +x $out/bin/start
+  '');
+
   fakeApp = pkgs.runCommand "fake-preview-app" { } ''
     mkdir -p $out/bin $out/share
     echo "hello from preview" > $out/share/index.html
@@ -30,6 +36,7 @@ in
       projects.demo = {
         hostPattern = "pr-@id@.preview.test";
         basePort = 8000;
+        startupTimeout = 15;
         redirectFrom = [ "pr-@id@.old.test" ];
         # Runtime-ownership pattern: exec the app's own entrypoint.
         startScript = _: ctx: ''
@@ -43,6 +50,7 @@ in
 
     # Make sure the fake app's store path exists in the VM's store.
     environment.etc."fake-app-anchor".source = fakeApp;
+    environment.etc."broken-app-anchor".source = brokenApp;
   };
 
   testScript = ''
@@ -70,6 +78,14 @@ in
         machine.succeed("nix-collect-garbage >&2")
         machine.succeed(f"test -e {app}")
         machine.succeed("curl -sf http://127.0.0.1:8005/index.html >&2")
+
+    with subtest("create FAILS (with journal) when the app never answers"):
+        broken = "${brokenApp}"
+        machine.succeed(
+            "demo-preview-create 6 " + broken + " > /tmp/broken.log 2>&1 && exit 1 || true"
+        )
+        machine.succeed("grep -q 'did not answer on port 8006' /tmp/broken.log")
+        machine.succeed("demo-preview-destroy 6 >&2 || true")
 
     with subtest("destroy tears everything down"):
         machine.succeed("demo-preview-destroy 5")
