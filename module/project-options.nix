@@ -26,6 +26,18 @@ with lib;
       description = "Instance port = basePort + PR number.";
     };
 
+    redirectFrom = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "pr-@id@.preview.old-domain.example" ];
+      description = ''
+        Legacy hostname patterns (same `@id@` substitution as hostPattern)
+        kept answering during a domain move: each preview also gets vhosts on
+        these names that 301-redirect to the current hostPattern. Remove
+        after the migration settles.
+      '';
+    };
+
     previewsDir = mkOption {
       type = types.path;
       default = "/var/lib/${name}-previews";

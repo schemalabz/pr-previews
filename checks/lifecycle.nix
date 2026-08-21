@@ -30,6 +30,7 @@ in
       projects.demo = {
         hostPattern = "pr-@id@.preview.test";
         basePort = 8000;
+        redirectFrom = [ "pr-@id@.old.test" ];
         # Runtime-ownership pattern: exec the app's own entrypoint.
         startScript = _: ctx: ''
           exec "$APP_DIR/bin/start"
@@ -57,6 +58,8 @@ in
 
     with subtest("caddy vhost dropped and caddy reloaded cleanly"):
         machine.succeed("test -f /etc/caddy/conf.d/demo-pr-5.conf")
+        machine.succeed("grep -q 'pr-5.old.test' /etc/caddy/conf.d/demo-pr-5.conf")
+        machine.succeed("grep -q 'redir https://pr-5.preview.test' /etc/caddy/conf.d/demo-pr-5.conf")
         machine.succeed("systemctl is-active caddy.service")
 
     with subtest("instance dir and GC root exist"):

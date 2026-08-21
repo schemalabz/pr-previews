@@ -9,7 +9,15 @@ let
   serviceName = "${name}-preview";
 
   # "@id@" -> a shell expansion of the given variable name.
-  hostFor = idVar: replaceStrings [ "@id@" ] [ "\${${idVar}}" ] project.hostPattern;
+  substHost = pattern: idVar: replaceStrings [ "@id@" ] [ "\${${idVar}}" ] pattern;
+  hostFor = idVar: substHost project.hostPattern idVar;
+
+  # 301-redirect vhosts for legacy hostnames during a domain move.
+  redirectBlocks = concatMapStrings (pattern: ''
+
+    ${substHost pattern "pr_num"} {
+      redir https://${hostFor "pr_num"}{uri} 301
+    }'') project.redirectFrom;
 
   siblingsFor = idVar: mapAttrs
     (sname: sp: rec {
@@ -142,7 +150,7 @@ in
         header_up X-Forwarded-For {remote_host}
         header_up X-Forwarded-Proto {scheme}
       }
-    }
+    }${redirectBlocks}
     CADDYEOF
 
     echo "Added Caddy config at $config_file"
