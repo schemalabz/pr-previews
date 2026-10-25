@@ -135,12 +135,18 @@ in
             optionals p.cachix.enable [ "https://${p.cachix.name}.cachix.org" ])));
           trusted-public-keys = unique (concatLists (forEachProject (_: p:
             optionals p.cachix.enable [ p.cachix.publicKey ])));
+          # Every deploy realises a new closure and orphans the previous
+          # one, so a busy week can fill the disk before a scheduled GC
+          # runs. Below min-free, Nix collects garbage during the build
+          # until max-free is available.
+          min-free = mkDefault (5 * 1024 * 1024 * 1024);
+          max-free = mkDefault (15 * 1024 * 1024 * 1024);
         };
-        # Weekly GC is safe because every instance holds a GC root
+        # GC is safe because every instance holds a GC root
         # (registered by the create script, released on destroy).
         gc = {
           automatic = mkDefault true;
-          dates = mkDefault "weekly";
+          dates = mkDefault "daily";
           options = mkDefault "--delete-older-than 30d";
         };
       }
