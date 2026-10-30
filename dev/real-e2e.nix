@@ -67,6 +67,7 @@ nixos-lib.runTest {
   };
   testScript = ''
     import json
+    import hashlib
     import shlex
     oc = "${ocProd}"
     notis = "${notisProd}"
@@ -115,6 +116,17 @@ nixos-lib.runTest {
         process_env("notis-preview@20009", "MAIN_DATABASE_URL=postgresql://notis_service@127.0.0.1:30009/opencouncil")
         process_env("notis-preview@20009", "MAIN_SESSION_COOKIE_NAME=__Secure-oc-session-pr9")
         notis_generation = state("notis")["generation"]
+
+    with subtest("Notis pages built without database credentials authenticate at runtime"):
+        sql("opencouncil", """INSERT INTO "Session" ("sessionToken", "userId", expires, "updatedAt")
+            SELECT 'preview-e2e-token', id, CURRENT_TIMESTAMP + interval '1 hour', CURRENT_TIMESTAMP
+            FROM "User" WHERE email = 'superadmin@test.com'""")
+        token_hash = hashlib.sha256(b"preview-e2e-token").hexdigest()
+        cookie = f"Cookie: __Secure-oc-session-pr9={token_hash}"
+        for route in ["/admin", "/admin/playground", "/api/admin/settings"]:
+            code = machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' -H {shlex.quote(cookie)} http://127.0.0.1:20009{route}").strip()
+            assert code == "200", f"{route} returned {code}; protected pages must not cache build-time login redirects"
+        machine.succeed("test $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:20009/api/admin/settings) = 401")
 
     with subtest("unchanged pushes preserve preview data"):
         sql("opencouncil", 'CREATE TABLE preview_sentinel (id integer); INSERT INTO preview_sentinel VALUES (1)')
