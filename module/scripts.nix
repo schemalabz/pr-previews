@@ -6,6 +6,7 @@
 { pkgs, lib, name, project, topCfg, allProjects }:
 with lib;
 let
+  database = import ./database.nix { inherit lib pkgs allProjects topCfg; };
   serviceName = "${name}-preview";
 
   # "@id@" -> a shell expansion of the given variable name.
@@ -24,6 +25,7 @@ let
       port = "$((${toString sp.basePort} + ${idVar}))";
       host = replaceStrings [ "@id@" ] [ "\${${idVar}}" ] sp.hostPattern;
       url = "https://${host}";
+      databases = database.urlsFor sname idVar;
     })
     (removeAttrs allProjects [ name ]);
 
@@ -38,6 +40,7 @@ let
     host = hostFor idVar;
     url = "https://${hostFor idVar}";
     cfg = ctxCfg;
+    databases = database.urlsFor name idVar;
     siblings = siblingsFor idVar;
   };
 
@@ -45,6 +48,7 @@ let
     // { appDir = "$APP_DIR"; };
   hookCtx = mkCtx { idVar = "pr_num"; portVar = "port"; dirVar = "pr_dir"; };
   createCtx = hookCtx // { storePath = "$store_path"; };
+  databaseLifecycle = database.forProject name project createCtx;
 
   # SC1091 (info): app-provided fragments may source runtime files
   # (per-instance env overrides) that shellcheck cannot follow — inherent
@@ -75,63 +79,63 @@ in
   };
 
   create = mkScript "${serviceName}-create" ''
-    ${if project.createExtraArgs != null then ''
-      usage() {
-        echo "Usage: ${serviceName}-create <pr-number> <nix-store-path> [options]"
-        echo ""
-        echo "${project.createExtraArgs.usage}"
-      }
-
-      if [ $# -lt 2 ]; then
-        usage >&2
-        exit 1
-      fi
-
-      pr_num="$1"
-      store_path="$2"
-      shift 2
-
-      ${project.createExtraArgs.initScript}
-
-      for arg in "$@"; do
-        case "$arg" in
-          --help|-h) usage; exit 0 ;;
-          ${project.createExtraArgs.parseScript}
-          *) echo "Unknown argument: $arg" >&2; usage >&2; exit 1 ;;
-        esac
-      done
-    '' else ''
-      if [ $# -ne 2 ]; then
-        echo "Usage: ${serviceName}-create <pr-number> <nix-store-path>" >&2
-        exit 1
-      fi
-
-      pr_num="$1"
-      store_path="$2"
-    ''}
+    if [ $# -lt 2 ]; then
+      echo "Usage: ${serviceName}-create <pr-number> <nix-store-path> [options]" >&2
+      exit 1
+    fi
+    pr_num="$1"
+    store_path="$2"
+    shift 2
+    data_variant=default
+    ${optionalString (project.createExtraArgs != null) project.createExtraArgs.initScript}
+    for arg in "$@"; do
+      case "$arg" in
+        ${optionalString (project.database.databases != { }) ''
+          --data-variant=*) data_variant="''${arg#--data-variant=}" ;;
+        ''}
+        --help|-h)
+          echo "Usage: ${serviceName}-create <pr-number> <nix-store-path> [options]"
+          ${optionalString (project.createExtraArgs != null) ''echo ${escapeShellArg project.createExtraArgs.usage}''}
+          exit 0 ;;
+        ${optionalString (project.createExtraArgs != null) project.createExtraArgs.parseScript}
+        *) echo "Unknown argument: $arg" >&2; exit 1 ;;
+      esac
+    done
+    if [[ ! "$pr_num" =~ ^[1-9][0-9]{0,3}$ ]]; then
+      echo "Error: PR number must be an integer from 1 to 9999" >&2
+      exit 1
+    fi
+    export DATA_VARIANT="$data_variant"
 
     port=$((${toString project.basePort} + pr_num))
     pr_dir="${project.previewsDir}/pr-$pr_num"
 
+    ${databaseLifecycle.lock}
     mkdir -p "$pr_dir"
 
-    # Fetch the closure (no-op if local) and register $pr_dir/app as an
-    # indirect GC root in one step. This is what protects live previews
-    # from the weekly nix-gc.
-    rm -f "$pr_dir/app"
-    nix-store --realise "$store_path" --add-root "$pr_dir/app" --indirect >/dev/null || {
+    # Validate database inputs while the previous app and GC root still work.
+    candidate="$pr_dir/.candidate"
+    trap 'rm -f "$candidate"' EXIT
+    rm -f "$candidate"
+    nix-store --realise "$store_path" --add-root "$candidate" --indirect >/dev/null || {
       echo "Error: could not fetch store path: $store_path" >&2
       exit 1
     }
+    chown ${topCfg.user}:${topCfg.group} "$pr_dir"
+    ${databaseLifecycle.preflight}
+
+    rm -f "$pr_dir/app"
+    nix-store --realise "$store_path" --add-root "$pr_dir/app" --indirect >/dev/null
+    rm -f "$candidate"
+    trap - EXIT
     chown -R ${topCfg.user}:${topCfg.group} "$pr_dir"
 
     echo "Creating preview for PR #$pr_num on port $port"
     echo "  App: $store_path"
 
-    ${optionalString (project.createHook != null) (project.createHook pkgs createCtx)}
-
-    # Stop existing service if running, then start fresh
     systemctl stop "${serviceName}@$port" 2>/dev/null || true
+    ${databaseLifecycle.create}
+    ${optionalString (project.createHook != null) (project.createHook pkgs createCtx)}
     systemctl start "${serviceName}@$port"
 
     # Readiness: success from this script must mean the app ANSWERS. Poll
@@ -189,9 +193,14 @@ in
     fi
 
     pr_num="$1"
+    if [[ ! "$pr_num" =~ ^[1-9][0-9]{0,3}$ ]]; then
+      echo "Error: PR number must be an integer from 1 to 9999" >&2
+      exit 1
+    fi
     port=$((${toString project.basePort} + pr_num))
     pr_dir="${project.previewsDir}/pr-$pr_num"
 
+    ${databaseLifecycle.lock}
     echo "Destroying preview for PR #$pr_num (port $port)"
 
     systemctl stop "${serviceName}@$port" || true
@@ -200,6 +209,7 @@ in
     # accumulate as failed-unit clutter.
     systemctl reset-failed "${serviceName}@$port" 2>/dev/null || true
 
+    ${databaseLifecycle.destroy}
     ${optionalString (project.destroyHook != null) (project.destroyHook pkgs hookCtx)}
 
     # Remove per-PR directory (removing the app symlink also releases the

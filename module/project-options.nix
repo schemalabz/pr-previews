@@ -177,6 +177,36 @@ with lib;
       '';
     };
 
+    database = {
+      cluster = mkOption {
+        type = types.nullOr (types.submodule {
+          options = {
+            package = mkOption { type = types.raw; description = "pkgs -> PostgreSQL package with required extensions."; };
+            basePort = mkOption { type = types.port; description = "Cluster port = basePort + PR number (1..9999)."; };
+            settings = mkOption {
+              type = types.attrsOf (types.oneOf [ types.str types.int ]);
+              default = { };
+              description = "Additional PostgreSQL settings. Port, listener, and socket location are managed by the module.";
+            };
+          };
+        });
+        default = null;
+        description = "Own a PostgreSQL cluster for each PR.";
+      };
+      databases = mkOption {
+        type = types.attrsOf (types.submodule {
+          options = {
+            "in" = mkOption { type = types.nullOr types.str; default = null; description = "Sibling cluster owner, or null for this project's cluster."; };
+            extensions = mkOption { type = types.listOf types.str; default = [ ]; description = "PostgreSQL extensions created before initialization."; };
+            init = mkOption { type = types.raw; description = "pkgs: ctx: shell. Initialize an empty database; DATABASE_URL and DATA_VARIANT are set."; };
+            fingerprint = mkOption { type = types.raw; description = "pkgs: ctx: shell. Print one nonempty line identifying the desired database contents."; };
+          };
+        });
+        default = { };
+        description = "Databases managed for each preview.";
+      };
+    };
+
     extraConfig = mkOption {
       type = types.nullOr types.raw;
       default = null;
