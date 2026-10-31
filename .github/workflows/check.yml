@@ -14,13 +14,13 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Eval check (two-project synthetic host)
-        run: nix build .#checks.x86_64-linux.eval --no-link -L
+      - name: Eval checks (projects and databases)
+        run: nix build .#checks.x86_64-linux.eval .#checks.x86_64-linux.database-eval --no-link -L
 
       - name: VM lifecycle check (requires KVM)
         run: |
           if [ -e /dev/kvm ]; then
-            nix build .#checks.x86_64-linux.lifecycle --no-link -L
+            nix build .#checks.x86_64-linux.lifecycle .#checks.x86_64-linux.database --no-link -L
           else
             echo "::warning::/dev/kvm not available on this runner — VM lifecycle check skipped"
           fi
