@@ -1,163 +1,157 @@
-# Real-app e2e in a local VM (dev-only, IMPURE — references local worktrees).
-# The tasks preview is the REQUIRED gate; the opencouncil --with-db flow is
-# best-effort with the outcome logged (see dev/REAL-E2E.md).
-#
-# Run:
-#   nix build --impure -f dev/real-e2e.nix -L
-#
-# Prereqs: seed_data.json fetched to the path below; app worktrees at their
-# converted commits.
+# Required real-application test. Inputs are local worktrees and a verified seed directory.
+# OC_WORKTREE=... TASKS_WORKTREE=... SEED_ARTIFACT_DIR=... nix build --impure -f dev/real-e2e.nix -L
 let
-  seedDataPath = "/tmp/claude-1000/-home-kouloumos-schema-labs-projects-nix-openclaw-worktrees-generic-preview-module/e5a6d67b-9b6a-4790-93ac-c99ed722462b/scratchpad/seed_data.json";
-
+  fromEnv = name: fallback: let value = builtins.getEnv name; in if value == "" then fallback else value;
+  ocPath = fromEnv "OC_WORKTREE" "/home/kouloumos/.codex/worktrees/per-pr-database/opencouncil";
+  tasksPath = fromEnv "TASKS_WORKTREE" "/home/kouloumos/schema-labs/projects/opencouncil-tasks-worktrees/generic-preview-module";
+  seedPath = fromEnv "SEED_ARTIFACT_DIR" "/tmp/opencouncil-seed-publication";
   flake = builtins.getFlake (toString ../.);
   nixpkgs = flake.inputs.nixpkgs;
   pkgs = import nixpkgs { system = "x86_64-linux"; };
   nixos-lib = import (nixpkgs + "/nixos/lib") { };
-
-  ocFlake = builtins.getFlake
-    "path:/home/kouloumos/schema-labs/projects/opencouncil-worktrees/generic-preview-module";
-  tasksFlake = builtins.getFlake
-    "path:/home/kouloumos/schema-labs/projects/opencouncil-tasks-worktrees/generic-preview-module";
-
+  ocFlake = builtins.getFlake "path:${ocPath}";
+  tasksFlake = builtins.getFlake "path:${tasksPath}";
   ocProd = ocFlake.packages.x86_64-linux.opencouncil-prod;
   notisProd = ocFlake.packages.x86_64-linux.notis-prod;
-  ocTasksProd = tasksFlake.packages.x86_64-linux.opencouncil-tasks-prod;
+  tasksProd = tasksFlake.packages.x86_64-linux.opencouncil-tasks-prod;
+  sameOc = pkgs.runCommand "opencouncil-preview-equivalent-closure" { } ''
+    mkdir -p $out
+    cp -rs ${ocProd}/. $out/
+  '';
+  changedOc = pkgs.runCommand "opencouncil-preview-fingerprint-change" { } ''
+    mkdir -p $out
+    cp -rs ${ocProd}/. $out/
+    rm $out/seed-bundle
+    mkdir -p $out/seed-bundle/lib
+    cat ${ocProd}/seed-bundle/lib/seed.cjs > $out/seed-bundle/lib/seed.cjs
+    printf '\n// Equivalent test revision with a different fingerprint.\n' >> $out/seed-bundle/lib/seed.cjs
+  '';
 in
 nixos-lib.runTest {
   name = "pr-previews-real-e2e";
   hostPkgs = pkgs;
-
   nodes.machine = { lib, pkgs, ... }: {
     imports = [ flake.nixosModules.default ];
-
-    virtualisation = {
-      writableStore = true;
-      memorySize = 4096;
-      diskSize = 12288;
-      cores = 2;
-    };
-
+    virtualisation = { writableStore = true; memorySize = 4096; diskSize = 16384; cores = 2; };
     services.pr-previews = {
       enable = true;
       user = "opencouncil";
       group = "opencouncil";
       projects = {
-        opencouncil = lib.mkMerge [
-          ocFlake.previews.opencouncil
-          { envFile = "/etc/preview-dummy.env"; }
-        ];
-        opencouncil-tasks = lib.mkMerge [
-          tasksFlake.previews.opencouncil-tasks
-          { envFile = "/etc/preview-dummy.env"; }
-        ];
-        notis = lib.mkMerge [
-          ocFlake.previews.notis
-          { envFile = "/etc/preview-dummy.env"; }
-        ];
+        opencouncil = lib.mkMerge [ ocFlake.previews.opencouncil { envFile = "/etc/preview-dummy.env"; startupTimeout = 120; } ];
+        opencouncil-tasks = lib.mkMerge [ tasksFlake.previews.opencouncil-tasks { envFile = "/etc/preview-dummy.env"; } ];
+        notis = lib.mkMerge [ ocFlake.previews.notis { envFile = "/etc/preview-dummy.env"; startupTimeout = 120; } ];
       };
     };
-
-    # No ACME in the sandbox.
     services.caddy.globalConfig = "auto_https off";
-
     environment.etc."preview-dummy.env".text = ''
       ANTHROPIC_API_KEY=dummy
       NOTIS_ADMIN_SECRET=dummy-secret-at-least-16-chars
       API_TOKENS=["dummy-preview-token"]
       NEXTAUTH_SECRET=dummy-secret-for-e2e
       ELASTICSEARCH_URL=http://127.0.0.1:59998
-      DATABASE_URL=postgresql://opencouncil@127.0.0.1:59999/placeholder
-      DIRECT_URL=postgresql://opencouncil@127.0.0.1:59999/placeholder
+      DATABASE_URL=postgresql://unreachable@127.0.0.1:59999/staging
+      DIRECT_URL=postgresql://unreachable@127.0.0.1:59999/staging
+      NOTIS_DATABASE_URL=postgresql://unreachable@127.0.0.1:59999/staging_notis
+      MAIN_DATABASE_URL=postgresql://unreachable@127.0.0.1:59999/staging
       SKIP_ENV_VALIDATION=1
     '';
-
-    environment.etc."seed_data.json".source = /. + seedDataPath;
-
-    # Anchor the real app closures into the VM's store.
+    environment.etc."seed/manifest.json".source = /. + "${seedPath}/manifest.json";
+    environment.etc."seed/subset.tar.zst".source = /. + "${seedPath}/subset.tar.zst";
     environment.etc."anchors/oc".source = ocProd;
     environment.etc."anchors/notis".source = notisProd;
-    environment.etc."anchors/tasks".source = ocTasksProd;
+    environment.etc."anchors/tasks".source = tasksProd;
+    environment.etc."anchors/changed-oc".source = changedOc;
+    environment.etc."anchors/same-oc".source = sameOc;
+    environment.systemPackages = [ pkgs.postgresql_16 ];
   };
-
   testScript = ''
-    tasks = "${ocTasksProd}"
+    import json
+    import hashlib
+    import shlex
     oc = "${ocProd}"
     notis = "${notisProd}"
-
+    tasks = "${tasksProd}"
+    changed_oc = "${changedOc}"
+    same_oc = "${sameOc}"
     machine.wait_for_unit("multi-user.target")
     machine.wait_for_unit("caddy.service")
 
-    with subtest("REQUIRED: real opencouncil-tasks preview serves HTTP"):
-        machine.succeed(f"opencouncil-tasks-preview-create 7 {tasks} >&2")
-        machine.wait_for_unit("opencouncil-tasks-preview@4007.service")
-        machine.wait_until_succeeds(
-            "code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4007/); test \"$code\" != 000",
-            timeout=120,
-        )
-        machine.succeed("test -f /etc/caddy/conf.d/opencouncil-tasks-pr-7.conf")
-        machine.succeed(f"nix-store --query --roots {tasks} | grep -q pr-7")
-        machine.succeed("opencouncil-tasks-preview-destroy 7 >&2")
+    def create_oc(app):
+        machine.succeed(f"SEED_ARTIFACT_URL=/etc/seed opencouncil-preview-create 9 {app} --data-variant=default", timeout=900)
 
-    with subtest("BEST-EFFORT: opencouncil --with-db (cluster, PostGIS, migrations, seed, boot)"):
-        outcome = "not-started"
-        try:
-            machine.succeed(
-                "mkdir -p /var/lib/opencouncil-previews/pr-9"
-                " && cp /etc/seed_data.json /var/lib/opencouncil-previews/pr-9/seed_data.json"
-                " && chown -R opencouncil:opencouncil /var/lib/opencouncil-previews/pr-9"
-            )
-            outcome = "create-started"
-            machine.succeed(f"opencouncil-preview-create 9 {oc} --with-db >&2", timeout=900)
-            outcome = "create-succeeded"
-            machine.wait_for_unit("opencouncil-preview-db@9.service")
-            outcome = "db-active"
-            machine.wait_for_unit("opencouncil-preview@3009.service")
-            outcome = "app-unit-active"
-            machine.wait_until_succeeds(
-                "code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3009/); test \"$code\" != 000",
-                timeout=300,
-            )
-            outcome = "app-responds"
-        except Exception as e:
-            machine.log(f"OUTCOME: {outcome}; failure: {e}")
-            machine.execute("journalctl -u opencouncil-preview@3009 -n 40 --no-pager >&2 || true")
-            machine.execute("journalctl -u opencouncil-preview-db@9 -n 20 --no-pager >&2 || true")
-            raise
-        print(f"### OPENCOUNCIL OUTCOME: {outcome}")
+    def sql(db, query, user="opencouncil"):
+        return machine.succeed(f"psql -h 127.0.0.1 -p 30009 -U {user} -d {db} -Atc {shlex.quote(query)}").strip()
 
-    with subtest("REQUIRED: paired notis preview — DB, migrations, role bridge, cookie env"):
-        machine.succeed(f"notis-preview-create 9 {notis} >&2")
-        machine.wait_for_unit("notis-preview@20009.service")
+    def state(db):
+        return json.loads(machine.succeed(f"cat /var/lib/opencouncil-previews/pr-9/.databases/{db}.json"))
 
-        # createHook results: notis DB exists with migrated tables; the
-        # notis_service login role can read the main DB.
-        machine.succeed(
-            "sudo -u opencouncil psql -h 127.0.0.1 -p 5441 -U opencouncil -d notis -tc \"SELECT count(*) FROM pg_tables WHERE schemaname='public'\" | grep -qv '^ *0$'"
-        )
-        machine.succeed(
-            "sudo -u opencouncil psql -h 127.0.0.1 -p 5441 -U notis_service -d opencouncil -tc 'SELECT 1' | grep -q 1"
-        )
+    def process_env(unit, expected):
+        machine.succeed(f"pid=$(systemctl show {unit} -p MainPID --value); tr '\\0' '\\n' < /proc/$pid/environ | grep -Fx {shlex.quote(expected)}")
 
-        # The running notis process got the paired env.
-        machine.succeed(
-            "pid=$(systemctl show notis-preview@20009 -p MainPID --value); "
-            "tr '\\0' '\\n' < /proc/$pid/environ | grep -x 'MAIN_SESSION_COOKIE_NAME=__Secure-oc-session-pr9'"
-        )
-        machine.succeed(
-            "pid=$(systemctl show notis-preview@20009 -p MainPID --value); "
-            "tr '\\0' '\\n' < /proc/$pid/environ | grep -q 'NOTIS_DATABASE_URL=postgresql://opencouncil@127.0.0.1:5441/notis'"
-        )
-        machine.wait_until_succeeds(
-            "code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:20009/); case $code in 2??|3??|401|403) true;; *) false;; esac",
-            timeout=120,
-        )
+    with subtest("tasks serves HTTP without database declarations"):
+        machine.succeed(f"opencouncil-tasks-preview-create 7 {tasks}")
+        machine.succeed("opencouncil-tasks-preview-destroy 7")
 
-        # The paired main preview mirrors its session with the pr-9 suffix.
-        machine.succeed(
-            "pid=$(systemctl show opencouncil-preview@3009 -p MainPID --value); "
-            "tr '\\0' '\\n' < /proc/$pid/environ | grep -x 'SESSION_COOKIE_SUFFIX=-pr9'"
-        )
-        machine.succeed("notis-preview-destroy 9 >&2")
+    with subtest("app loads the subset, migrations, and test accounts"):
+        machine.succeed("mkdir -p /var/lib/opencouncil-previews/pr-9; printf '%s\\n' 'DATABASE_URL=postgresql://unreachable@127.0.0.1:59999/staging' 'DIRECT_URL=postgresql://unreachable@127.0.0.1:59999/staging' > /var/lib/opencouncil-previews/pr-9/.env.local")
+        create_oc(oc)
+        machine.wait_for_unit("opencouncil-preview-db@9.service")
+        assert int(sql("opencouncil", 'SELECT count(*) FROM "CouncilMeeting"')) > 0
+        assert sql("opencouncil", """SELECT count(*) FROM "User" WHERE email='superadmin@test.com' AND "isSuperAdmin" """) == "1"
+        assert sql("opencouncil", 'SELECT count(*) FROM _prisma_migrations WHERE finished_at IS NULL AND rolled_back_at IS NULL') == "0"
+        process_env("opencouncil-preview@3009", "DATABASE_URL=postgresql://opencouncil@127.0.0.1:30009/opencouncil")
+        process_env("opencouncil-preview@3009", "DIRECT_URL=postgresql://opencouncil@127.0.0.1:30009/opencouncil")
+        process_env("opencouncil-preview@3009", "SESSION_COOKIE_SUFFIX=-pr9")
+        machine.succeed("curl -sf http://127.0.0.1:3009/ >/dev/null")
+        original = state("opencouncil")["generation"]
+
+    with subtest("notis uses its paired database and main read-only role"):
+        machine.succeed(f"notis-preview-create 9 {notis}", timeout=300)
+        assert int(sql("notis", "SELECT count(*) FROM pg_tables WHERE schemaname='public'")) > 0
+        assert sql("opencouncil", "SELECT pg_has_role('notis_service', 'notis_reader', 'member')") == "t"
+        assert int(sql("opencouncil", "SELECT count(*) FROM notis_admin_sessions", user="notis_service")) >= 0
+        machine.fail("psql -h 127.0.0.1 -p 30009 -U notis_service -d opencouncil -c 'SELECT * FROM \"User\" LIMIT 1'")
+        process_env("notis-preview@20009", "NOTIS_DATABASE_URL=postgresql://opencouncil@127.0.0.1:30009/notis")
+        process_env("notis-preview@20009", "MAIN_DATABASE_URL=postgresql://notis_service@127.0.0.1:30009/opencouncil")
+        process_env("notis-preview@20009", "MAIN_SESSION_COOKIE_NAME=__Secure-oc-session-pr9")
+        notis_generation = state("notis")["generation"]
+
+    with subtest("Notis pages built without database credentials authenticate at runtime"):
+        sql("opencouncil", """INSERT INTO "Session" ("sessionToken", "userId", expires, "updatedAt")
+            SELECT 'preview-e2e-token', id, CURRENT_TIMESTAMP + interval '1 hour', CURRENT_TIMESTAMP
+            FROM "User" WHERE email = 'superadmin@test.com'""")
+        token_hash = hashlib.sha256(b"preview-e2e-token").hexdigest()
+        cookie = f"Cookie: __Secure-oc-session-pr9={token_hash}"
+        for route in ["/admin", "/admin/playground", "/api/admin/settings"]:
+            code = machine.succeed(f"curl -s -o /dev/null -w '%{{http_code}}' -H {shlex.quote(cookie)} http://127.0.0.1:20009{route}").strip()
+            assert code == "200", f"{route} returned {code}; protected pages must not cache build-time login redirects"
+        machine.succeed("test $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:20009/api/admin/settings) = 401")
+
+    with subtest("unchanged pushes preserve preview data"):
+        sql("opencouncil", 'CREATE TABLE preview_sentinel (id integer); INSERT INTO preview_sentinel VALUES (1)')
+        create_oc(same_oc)
+        assert state("opencouncil")["generation"] == original
+        assert sql("opencouncil", "SELECT count(*) FROM preview_sentinel") == "1"
+
+    with subtest("unsupported variants fail before replacing existing data"):
+        machine.fail(f"SEED_ARTIFACT_URL=/etc/seed opencouncil-preview-create 9 {oc} --data-variant=full")
+        assert state("opencouncil")["generation"] == original
+        assert sql("opencouncil", "SELECT count(*) FROM preview_sentinel") == "1"
+
+    with subtest("seed fingerprint change rebuilds owner and dependent"):
+        create_oc(changed_oc)
+        assert state("opencouncil")["generation"] > original
+        assert sql("opencouncil", "SELECT to_regclass('public.preview_sentinel') IS NULL") == "t"
+        machine.succeed(f"notis-preview-create 9 {notis}", timeout=300)
+        assert state("notis")["generation"] > notis_generation
+        assert int(sql("opencouncil", 'SELECT count(*) FROM "CouncilMeeting"')) > 0
+
+    with subtest("destroy removes dependent database and owner cluster"):
+        machine.succeed("notis-preview-destroy 9")
+        assert sql("postgres", "SELECT count(*) FROM pg_database WHERE datname='notis'") == "0"
+        machine.succeed("opencouncil-preview-destroy 9")
+        machine.fail("systemctl is-active opencouncil-preview-db@9")
+        machine.succeed("test ! -e /var/lib/opencouncil-previews/pr-9")
   '';
 }

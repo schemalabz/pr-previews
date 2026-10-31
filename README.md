@@ -125,20 +125,77 @@ fragment. `ctx` fields are shell expansions valid at that call site:
 | `storePath` | — | `$store_path` (create only) | the deployed closure |
 | `host` / `url` | hostPattern with the PR number substituted | same | |
 | `cfg` | project config (+ shared `user`/`group`); free-form values under `cfg.settings` | same | |
-| `siblings.<name>` | `{ port, host, url }` of other projects, same PR | same | |
+| `siblings.<name>` | `{ port, host, url, databases }` of other projects, same PR | same | |
+| `databases.<name>.url` | this project's database URL | same | loopback PostgreSQL URL |
+| `siblings.<project>.databases.<name>.url` | a sibling's database URL | same | loopback PostgreSQL URL |
 
 Optional per-project options: `redirectFrom` (legacy hostname patterns
 that 301 to the current one — see "Moving domains"), `envFile` (shared
 per-project EnvironmentFile), and hooks: `createHook` (after fetch, before
-start — DB provisioning lives here), `destroyHook` (after stop, before
-cleanup), `createSummary`, `createExtraArgs` (add flags like `--with-db` to
-the create script), `extraConfig` (arbitrary NixOS config, e.g. an auxiliary per-PR
-database template unit — may target `systemd`/`environment`/`security`/
+start, after managed database initialization), `destroyHook` (after stop, before
+cleanup), `createSummary`, `createExtraArgs` (add application flags to
+the create script), `extraConfig` (arbitrary NixOS config — may target `systemd`/`environment`/`security`/
 `users`/`networking`/`nix`, not `services.*`), `extraPackages`,
 `extraSudoCommands`, `settings` (free-form values for your hooks).
 
 The ultimate escape hatch is standard NixOS: override anything on
 `systemd.services."<name>-preview@"` from your own config.
+
+## Per-PR databases
+
+A project can own a PostgreSQL cluster for each PR:
+
+```nix
+database = {
+  cluster = {
+    package = pkgs: pkgs.postgresql_16;
+    basePort = 30000;
+    settings.shared_buffers = "48MB";
+  };
+  databases.myapp = {
+    extensions = [ ];
+    init = pkgs: ctx: ''
+      "$store_path/bin/initialize" "$DATABASE_URL"
+    '';
+    fingerprint = pkgs: ctx: ''
+      ${pkgs.coreutils}/bin/sha256sum "$store_path/schema.sql" | ${pkgs.coreutils}/bin/cut -d ' ' -f 1
+    '';
+  };
+};
+startScript = _: ctx: ''
+  export DATABASE_URL="${ctx.databases.myapp.url}"
+  exec "$APP_DIR/bin/start"
+'';
+```
+
+A sibling adds a database to that cluster with `database.databases.<name>.in = "myapp"`.
+Create the owner before its dependents. Each owner must declare at least one database of its own.
+The cluster role is the shared preview user. Database names must be PostgreSQL identifiers of at most 63 characters.
+
+The cluster unit is `<owner>-preview-db@<PR>`. Its port is `cluster.basePort + PR`.
+PR numbers range from 1 through 9999. Database port ranges must not overlap application or other cluster ranges.
+The module manages PostgreSQL's port, data directory, listener, and socket settings.
+
+`init` and `fingerprint` run as the preview user. They receive `DATABASE_URL`, `DATA_VARIANT`, and the create context.
+A fingerprint must print exactly one nonempty line. It runs before replacing the application or initializing databases, so it must not require a database connection. A fingerprint failure preserves the running application and its GC root. Avoid including the closure's store path when hashing file contents.
+`<project>-preview-create N PATH --data-variant=NAME` selects a variant; the default is `default`.
+The application decides what each variant means.
+
+Create and destroy operations lock the project and all clusters they use.
+The module initializes missing databases and rebuilds databases whose variant or fingerprint changed.
+An unchanged deployment preserves data. A dependent also rebuilds when an owner database generation changes, on its next create.
+Initialization failure drops the incomplete database and removes its successful state.
+Generation counters survive destruction to avoid reusing old generation values.
+
+State lives in `<owner previewsDir>/pr-N/.databases/<name>.json`.
+For dependents, `ownerGeneration` records a map of the owner's database names to their generations.
+Destroying a dependent drops its databases. Destroying the owner stops its cluster before removing its PR directory.
+Destroy dependents before their owner.
+
+The host option `services.pr-previews.database.minFreeDisk` defaults to 2048 MiB.
+The module checks this threshold before initializing a new cluster.
+Cluster units do not restart automatically during a NixOS configuration switch.
+Projects must export their generated database URLs in `startScript`, after loading environment overrides.
 
 ## DNS and TLS requirements
 

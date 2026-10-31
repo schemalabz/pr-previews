@@ -18,6 +18,14 @@
           inherit nixpkgs system;
           module = self.nixosModules.default;
         };
+        database-eval = import ./checks/database-eval.nix {
+          inherit nixpkgs system;
+          module = self.nixosModules.default;
+        };
+        database = nixos-lib.runTest (import ./checks/database.nix {
+          inherit pkgs;
+          module = self.nixosModules.default;
+        });
         lifecycle = nixos-lib.runTest (import ./checks/lifecycle.nix {
           inherit pkgs;
           module = self.nixosModules.default;

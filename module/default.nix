@@ -16,6 +16,8 @@ let
   cfg = config.services.pr-previews;
   enabledProjects = filterAttrs (_: p: p.enable) cfg.projects;
 
+  database = import ./database.nix { inherit lib pkgs; topCfg = cfg; allProjects = enabledProjects; };
+
   # "pr-@id@.preview.example.com" -> "preview.example.com"
   baseDomainOf = pattern:
     concatStringsSep "." (tail (splitString "." (replaceStrings [ "@id@" ] [ "0" ] pattern)));
@@ -75,6 +77,12 @@ in
       '';
     };
 
+    database.minFreeDisk = mkOption {
+      type = types.ints.unsigned;
+      default = 2048;
+      description = "Minimum free disk space in MiB before creating a new preview cluster.";
+    };
+
     projects = mkOption {
       type = types.attrsOf (types.submodule (import ./project-options.nix));
       default = { };
@@ -83,7 +91,7 @@ in
   };
 
   config = mkIf (cfg.enable && enabledProjects != { }) {
-    assertions =
+    assertions = database.assertions ++
       (forEachProject (name: _: {
         assertion = builtins.match "[a-z][a-z0-9-]*" name != null;
         message = "services.pr-previews: project name '${name}' must be a lowercase DNS-safe label ([a-z][a-z0-9-]*).";
@@ -166,14 +174,14 @@ in
           ++ forEachProject (_: p:
             "d ${p.previewsDir} 0755 ${cfg.user} ${cfg.group} -");
 
-        services = mapAttrs'
+        services = (mapAttrs'
           (name: project:
             nameValuePair "${name}-preview@" (import ./service.nix {
               inherit lib name project;
               topCfg = cfg;
               startScript = getExe (scriptsFor name project).start;
             }))
-          enabledProjects;
+          enabledProjects) // database.services;
       }
     ] ++ extraOf "systemd");
 
@@ -205,6 +213,11 @@ in
                 { command = "/run/current-system/sw/bin/${serviceName}-create"; options = [ "NOPASSWD" ]; }
                 { command = "/run/current-system/sw/bin/${serviceName}-destroy"; options = [ "NOPASSWD" ]; }
               ]
+              ++ (optionals (project.database.cluster != null) [
+                { command = "${pkgs.systemd}/bin/systemctl start ${name}-preview-db@*"; options = [ "NOPASSWD" ]; }
+                { command = "${pkgs.systemd}/bin/systemctl stop ${name}-preview-db@*"; options = [ "NOPASSWD" ]; }
+                { command = "${pkgs.systemd}/bin/systemctl status ${name}-preview-db@*"; options = [ "NOPASSWD" ]; }
+              ])
               ++ (optionals (project.extraSudoCommands != null)
                    (project.extraSudoCommands { inherit pkgs serviceName; }));
           });
