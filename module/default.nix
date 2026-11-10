@@ -141,6 +141,11 @@ in
           # until max-free is available.
           min-free = mkDefault (5 * 1024 * 1024 * 1024);
           max-free = mkDefault (15 * 1024 * 1024 * 1024);
+          # GC removes local copies of paths that Cachix may also have
+          # evicted and since re-uploaded under new NAR URLs. Nix trusts a
+          # cached narinfo for 30 days, so the host would keep asking for
+          # the deleted NAR ("does not exist in binary cache").
+          narinfo-cache-positive-ttl = mkDefault 3600;
         };
         # GC is safe because every instance holds a GC root
         # (registered by the create script, released on destroy).
